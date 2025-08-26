@@ -9,17 +9,15 @@ type ProfileRow = {
 export async function getSessionProfile() {
   const supabase = supabaseServer();
 
-  // Get the currently signed-in user (server-side)
   const {
     data: { user },
     error: userErr,
   } = await supabase.auth.getUser();
 
   if (userErr || !user) {
-    return { user: null as const, profile: null as const };
+    return { user: null, profile: null };
   }
 
-  // Fetch the matching profile row (RLS enforced)
   const { data: profile } = await supabase
     .from('profiles')
     .select('*')
