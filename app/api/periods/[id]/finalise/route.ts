@@ -6,6 +6,7 @@ import { supabaseServer } from '../../../../../lib/supabaseServer';
 import { getSessionProfile } from '../../../../../lib/auth';
 import { renderToStream } from '@react-pdf/renderer';
 import ReportDocument from '../../../../components/pdf/ReportDocument';
+import type { Readable } from 'stream';
 
 type MetricRow = { id: string; code: string };
 type SubmissionRow = { id: string; organisation: string };
@@ -47,21 +48,23 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
     valuesByOrg[s.organisation] = bag;
   }
 
-  // Render PDF
-  const stream = await renderToStream(ReportDocument({ periodCode: period.period_code, valuesByOrg }));
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (value) chunks.push(value);
+  // Render PDF -> Node Readable stream
+  const stream = (await renderToStream(
+    ReportDocument({ periodCode: period.period_code, valuesByOrg })
+  )) as unknown as Readable;
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream as any) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const pdfBytes = Buffer.concat(chunks);
 
   // Upload to Supabase Storage
   const bucket = process.env.SUPABASE_STORAGE_BUCKET!;
   const path = `reports/${period.period_code}.pdf`;
-  const { error: upErr } = await sb.storage.from(bucket).upload(path, pdfBytes, { upsert: true, contentType: 'application/pdf' });
+  const { error: upErr } = await sb.storage
+    .from(bucket)
+    .upload(path, pdfBytes, { upsert: true, contentType: 'application/pdf' });
   if (upErr) return new NextResponse(upErr.message, { status: 400 });
 
   await sb.from('periods').update({ status: 'finalised', report_pdf_path: path }).eq('id', period.id);
