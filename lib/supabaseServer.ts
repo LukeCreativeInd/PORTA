@@ -13,7 +13,6 @@ export function supabaseServer() {
           return cookieStore.get(name)?.value;
         },
         set(name: string, value: string, options: any) {
-          // Next.js server: setting cookies in route handlers / server components
           cookieStore.set({ name, value, ...options });
         },
         remove(name: string, options: any) {
