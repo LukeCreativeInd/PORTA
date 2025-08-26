@@ -1,0 +1,1 @@
+-- Seed metrics file (abbreviated, use the one you ran in Supabase)
