@@ -1,1 +1,8 @@
-body { font-family: sans-serif; }
+*{box-sizing:border-box}html,body{margin:0;padding:0;font-family:ui-sans-serif,system-ui}
+label{display:block;margin:.5rem 0 .25rem}
+input,select,button{padding:.5rem;border:1px solid #ddd;border-radius:6px}
+button{cursor:pointer}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{border-bottom:1px solid #eee;padding:.5rem;text-align:right}
+.table th:first-child,.table td:first-child{text-align:left}
+.badge{display:inline-block;padding:.2rem .5rem;border-radius:999px;background:#eef}
