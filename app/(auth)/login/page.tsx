@@ -9,13 +9,29 @@ export default function LoginPage() {
   const [error, setError] = useState<string|null>(null);
   const router = useRouter();
 
-  const onSubmit = async (e:any) => {
-    e.preventDefault();
-    setError(null);
-    const { error } = await supabaseBrowser.auth.signInWithPassword({ email, password });
-    if (error) { setError(error.message); return; }
-    router.push('/dashboard');
-  };
+  const onSubmit = async (e: any) => {
+  e.preventDefault();
+  setError(null);
+
+  const { error } = await supabaseBrowser.auth.signInWithPassword({ email, password });
+  if (error) { setError(error.message); return; }
+
+  // Get the session from the browser client…
+  const { data: sess } = await supabaseBrowser.auth.getSession();
+  const access_token = sess?.session?.access_token;
+  const refresh_token = sess?.session?.refresh_token;
+
+  // …and sync it to the server via our API so server components can see the user.
+  if (access_token && refresh_token) {
+    await fetch('/api/auth/set-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ access_token, refresh_token }),
+    });
+  }
+
+  router.push('/dashboard');
+};
 
   return (
     <div className="max-w-sm mx-auto">
