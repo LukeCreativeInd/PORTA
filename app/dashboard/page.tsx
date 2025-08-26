@@ -3,6 +3,13 @@ import { supabaseServer } from '@/lib/supabaseServer';
 import SubmissionForm from '@/app/components/SubmissionForm';
 import Link from 'next/link';
 
+type PeriodRow = {
+  id: string;
+  period_code: string;
+  status: 'open' | 'finalising' | 'finalised';
+  report_pdf_path?: string | null;
+};
+
 export default async function Dashboard() {
   const { user, profile } = await getSessionProfile();
   if (!user) return <div>Not signed in. <a href="/login">Login</a></div>;
@@ -13,6 +20,8 @@ export default async function Dashboard() {
     .select('*')
     .order('year', { ascending: false })
     .order('month', { ascending: false });
+
+  const rows = (periods ?? []) as PeriodRow[];
 
   return (
     <div className="space-y-8">
@@ -29,11 +38,13 @@ export default async function Dashboard() {
       <section>
         <h2>Finalised Reports</h2>
         <ul>
-          {(periods||[]).filter(p=>p.status==='finalised' && p.report_pdf_path).map(p=> (
-            <li key={p.id}>
-              <a href={`/api/reports/${p.period_code}`} target="_blank">Download report {p.period_code}</a>
-            </li>
-          ))}
+          {rows
+            .filter((p) => p.status === 'finalised' && !!p.report_pdf_path)
+            .map((p) => (
+              <li key={p.id}>
+                <a href={`/api/reports/${p.period_code}`} target="_blank">Download report {p.period_code}</a>
+              </li>
+            ))}
         </ul>
       </section>
     </div>
