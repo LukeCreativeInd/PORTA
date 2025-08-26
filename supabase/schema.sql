@@ -1,0 +1,1 @@
+-- Schema file (abbreviated, use the one you ran in Supabase)
