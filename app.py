@@ -20,14 +20,18 @@ def is_within_window(period_code: str):
     return False
 
 def fetch_profile(sb: Client, user_id: str):
-    res = sb.table("profiles").select("role, organisation").eq("user_id", user_id).single().execute()
+    res = sb.table("profiles").select("role, organisation").eq("user_id", user_id).maybe_single().execute()
     return res.data if res.data else None
 
-def upsert_profiles_row(sb: Client, user_id: str, email: str):
-    # Ensure a profiles row exists (admins can later update role/org)
-    prof = sb.table("profiles").select("user_id").eq("user_id", user_id).maybe_single().execute().data
-    if not prof:
-        sb.table("profiles").insert({"user_id": user_id, "email": email, "role": "submitter", "organisation": "Unknown"}).execute()
+def ensure_postgrest_auth(sb: Client):
+    # Make sure PostgREST uses the user's JWT (not just the anon key)
+    try:
+        sess = sb.auth.get_session()
+        token = getattr(sess, "access_token", None) or (sess.get("access_token") if isinstance(sess, dict) else None)
+        if token:
+            sb.postgrest.auth(token)
+    except Exception:
+        pass
 
 def load_submission(sb: Client, org: str, period_code: str):
     return sb.table("submissions").select("id, status, values").eq("organisation", org).eq("period_code", period_code).maybe_single().execute().data
@@ -56,9 +60,12 @@ if "user" not in st.session_state:
         try:
             resp = sb.auth.sign_in_with_password({"email": email, "password": password})
             if resp.user:
+                # Ensure subsequent table calls use the user's JWT
+                try:
+                    sb.postgrest.auth(resp.session.access_token)
+                except Exception:
+                    pass
                 st.session_state["user"] = {"id": resp.user.id, "email": email}
-                # Ensure a profiles row exists for this user
-                upsert_profiles_row(sb, resp.user.id, email)
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -66,10 +73,14 @@ if "user" not in st.session_state:
             st.error(f"Login failed: {e}")
     st.stop()
 
+# Re-apply auth header on reruns
+ensure_postgrest_auth(sb)
+
 user = st.session_state["user"]
 profile = fetch_profile(sb, user["id"])
+
 if not profile:
-    st.error("No profile found. Ask an admin to set your organisation/role.")
+    st.error("No profile found for your account.\n\nAsk an admin to create your profile row in the `profiles` table with your `user_id`, role and organisation.")
     st.stop()
 
 role = profile["role"]
@@ -81,6 +92,10 @@ with st.sidebar:
     st.markdown(f"**Role:** {role}")
     page = st.radio("Navigate", ["Dashboard", "Reports"] + (["Admin"] if is_admin else []))
     if st.button("Sign out"):
+        try:
+            sb.auth.sign_out()
+        except Exception:
+            pass
         st.session_state.clear()
         st.rerun()
 
@@ -98,12 +113,14 @@ if page == "Dashboard":
             # list orgs
             org_rows = sb.table("profiles").select("organisation").execute().data or []
             orgs = sorted({r["organisation"] for r in org_rows if r.get("organisation")})
-            org_pick = st.selectbox("Organisation", options=orgs, index=orgs.index(org) if org in orgs else 0)
+            if not orgs:
+                st.warning("No organisations found in profiles.")
+            org_pick = st.selectbox("Organisation", options=orgs, index=orgs.index(org) if org in orgs else 0 if orgs else None)
         with cols[1]:
             period_pick = st.text_input("Period (YYYY-MM)", value=period)
         with cols[2]:
             do_load = st.button("Load")
-        if do_load:
+        if do_load and orgs:
             org = org_pick
             period = period_pick
 
@@ -154,11 +171,11 @@ if page == "Admin":
     with cols[0]:
         org_rows = sb.table("profiles").select("organisation").execute().data or []
         orgs = sorted({r["organisation"] for r in org_rows if r.get("organisation")})
-        admin_org = st.selectbox("Organisation", options=orgs)
+        admin_org = st.selectbox("Organisation", options=orgs) if orgs else None
     with cols[1]:
         admin_period = st.text_input("Period (YYYY-MM)", value=previous_month_code())
     with cols[2]:
-        if st.button("Load submission"):
+        if st.button("Load submission") and admin_org:
             st.session_state["admin_load"] = True
     with cols[3]:
         if st.button("Export CSV (month)"):
@@ -172,8 +189,6 @@ if page == "Admin":
                     "dist_victas": v.get("dist_victas",0), "dist_wa": v.get("dist_wa",0), "dist_total": v.get("dist_total",0),
                 })
             if flat:
-                import io
-                import csv
                 import pandas as pd
                 df = pd.DataFrame(flat)
                 csv_bytes = df.to_csv(index=False).encode("utf-8")
@@ -181,7 +196,7 @@ if page == "Admin":
             else:
                 st.warning("No data for that month.")
 
-    if st.session_state.get("admin_load"):
+    if st.session_state.get("admin_load") and admin_org:
         sub = load_submission(sb, admin_org, admin_period) or {"id": None, "status": "draft", "values": {}}
         vals = {k: int(sub["values"].get(k, 0)) for k in ["dist_nsw","dist_qld","dist_sant","dist_victas","dist_wa"]}
         st.subheader(f"Edit — {admin_org} / {admin_period}")
