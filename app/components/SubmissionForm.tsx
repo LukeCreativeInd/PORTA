@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { supabaseBrowser } from '@/lib/supabaseClient'; // NOTE: this is an INSTANCE in your repo
+import { supabaseBrowser } from '@/lib/supabaseClient'; // instance
 
 type Role = 'admin' | 'submitter';
 type Status = 'draft' | 'submitted' | 'locked';
@@ -10,7 +10,6 @@ type Key = typeof KEYS[number];
 type Values = Record<Key, number>;
 
 function previousMonthCode(now = new Date()) {
-  // Use UTC to avoid timezone edge cases for month boundaries
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
@@ -18,16 +17,16 @@ function previousMonthCode(now = new Date()) {
 }
 
 function isWithinEditWindow(periodCode: string, now = new Date()) {
-  // Submitters can edit only days 1–7 for the PREVIOUS month
   const day = now.getUTCDate();
   if (day > 7) return false;
   return periodCode === previousMonthCode(now);
 }
 
 export default function SubmissionForm() {
-  const supabase = supabaseBrowser; // <- NOTE: do not call as a function
+  const supabase = supabaseBrowser;
+
   const [role, setRole] = useState<Role>('submitter');
-  const [organisation, setOrganisation] = useState<string>('TestCo');
+  const [organisation, setOrganisation] = useState<string>('');
   const [periodCode, setPeriodCode] = useState<string>(previousMonthCode());
   const [status, setStatus] = useState<Status>('draft');
   const [values, setValues] = useState<Partial<Values>>({});
@@ -39,7 +38,6 @@ export default function SubmissionForm() {
   const [adminOrg, setAdminOrg] = useState<string>('');
   const [adminPeriod, setAdminPeriod] = useState<string>(previousMonthCode());
   const [orgOptions, setOrgOptions] = useState<string[]>([]);
-  const [reloadKey, setReloadKey] = useState<number>(0);
 
   const total = useMemo(
     () => KEYS.reduce((sum, k) => sum + Number(values[k] ?? 0), 0),
@@ -49,38 +47,45 @@ export default function SubmissionForm() {
   const isAdmin = role === 'admin';
   const canEdit = (isAdmin || isWithinEditWindow(periodCode)) && status !== 'locked';
 
-  // Loader function so admins can “Load” any org/period selection
+  // Centralised loader that uses **profiles** for role/org (not auth metadata)
   async function loadData(targetOrg?: string, targetPeriod?: string) {
     setLoading(true);
 
-    // 1) Who am I / org / role
+    // 1) Get authenticated user id
     const { data: { user } } = await supabase.auth.getUser();
-    const meta = (user?.user_metadata ?? {}) as { role?: Role; organisation?: string };
-    const resolvedRole: Role = (meta.role as Role) ?? 'submitter';
-    const resolvedOrg = meta.organisation ?? 'TestCo';
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+
+    // 2) Read role/org from public.profiles
+    const { data: prof } = await supabase
+      .from('profiles')
+      .select('role, organisation')
+      .eq('user_id', user.id)
+      .single();
+
+    const resolvedRole: Role = (prof?.role as Role) ?? 'submitter';
+    const resolvedOrg = prof?.organisation ?? '';
     setRole(resolvedRole);
 
-    // If admin, optionally load list of organisations for the selector
+    // 3) If admin, preload organisations for selector
     if (resolvedRole === 'admin') {
-      const { data: orgs, error } = await supabase
+      const { data: orgs } = await supabase
         .from('profiles')
         .select('organisation')
         .order('organisation');
-
-      if (!error && orgs) {
-        const uniq = Array.from(new Set(orgs.map(o => o.organisation).filter(Boolean)));
-        setOrgOptions(uniq);
-        if (!adminOrg && uniq.length) {
-          setAdminOrg(uniq[0]);
-        }
-      }
+      const uniq = Array.from(new Set((orgs ?? []).map(o => o.organisation).filter(Boolean)));
+      setOrgOptions(uniq);
+      if (!adminOrg && uniq.length) setAdminOrg(uniq[0]);
     }
 
-    // 2) Determine which org/period to show
-    const finalOrg = isAdmin ? (targetOrg || adminOrg || resolvedOrg) : resolvedOrg;
-    const finalPeriod = isAdmin ? (targetPeriod || adminPeriod || previousMonthCode()) : previousMonthCode();
+    // 4) Compute target org/period using **local** isAdmin flag to avoid stale state
+    const isAdminLocal = resolvedRole === 'admin';
+    const finalOrg = isAdminLocal ? (targetOrg || adminOrg || resolvedOrg) : resolvedOrg;
+    const finalPeriod = isAdminLocal ? (targetPeriod || adminPeriod || previousMonthCode()) : previousMonthCode();
 
-    // 3) Load or init the submission for finalOrg + finalPeriod
+    // 5) Fetch or init submission for that org+period
     const { data: sub } = await supabase
       .from('submissions')
       .select('id, status, values')
@@ -101,7 +106,7 @@ export default function SubmissionForm() {
       setValues({ dist_nsw: 0, dist_qld: 0, dist_sant: 0, dist_victas: 0, dist_wa: 0 });
     }
 
-    // Reflect selection in header
+    // 6) Reflect selection in UI
     setOrganisation(finalOrg);
     setPeriodCode(finalPeriod);
 
@@ -109,11 +114,10 @@ export default function SubmissionForm() {
     setLoading(false);
   }
 
-  // Initial load (and whenever reloadKey changes for admin “Load” action)
   useEffect(() => {
     loadData().catch(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
+  }, []);
 
   function onChange(k: Key, v: string) {
     if (!canEdit) return;
@@ -161,6 +165,9 @@ export default function SubmissionForm() {
       {/* Admin selection controls */}
       {isAdmin && (
         <div className="mb-6 p-4 border rounded-lg bg-gray-50 flex flex-wrap gap-4 items-end">
+          <div className="text-xs text-gray-700 w-full">
+            <b>Admin mode</b> — switch organisation/period and click <i>Load</i> to edit.
+          </div>
           <div>
             <label className="block text-xs mb-1">Organisation</label>
             <select
@@ -182,16 +189,10 @@ export default function SubmissionForm() {
           </div>
           <button
             className="px-3 py-2 border rounded bg-white hover:bg-gray-100"
-            onClick={() => {
-              // Load with current admin selections
-              loadData(adminOrg, adminPeriod);
-            }}
+            onClick={() => loadData(adminOrg, adminPeriod)}
           >
             Load
           </button>
-          <div className="text-xs text-gray-600 ml-auto">
-            You are signed in as <b>admin</b>. You can edit any organisation & period.
-          </div>
         </div>
       )}
 
@@ -199,7 +200,7 @@ export default function SubmissionForm() {
         <h2 className="text-2xl font-semibold mb-3">Your Submissions</h2>
         <div className="text-sm mb-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
           <div><strong>Period:</strong> {periodCode || '—'}</div>
-          <div><strong>Organisation:</strong> {organisation}</div>
+          <div><strong>Organisation:</strong> {organisation || '—'}</div>
           <div><strong>Status:</strong> {status}</div>
         </div>
 
@@ -263,7 +264,7 @@ export default function SubmissionForm() {
 
       <section>
         <h2 className="text-2xl font-semibold mb-3">Finalised Reports</h2>
-        {/* Plug your existing reports list here if desired */}
+        {/* Add your reports listing here if needed */}
       </section>
     </div>
   );
