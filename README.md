@@ -1,1 +1,0 @@
-# VMA Interim Reporting Portal (v1)\n\nSee Supabase + Vercel setup instructions.
