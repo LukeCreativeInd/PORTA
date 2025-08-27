@@ -15,23 +15,23 @@ def previous_month_code(today=None):
 
 def is_within_window(period_code: str):
     today = dt.date.today()
-    if 1 <= today.day <= 7 and previous_month_code(today) == period_code:
-        return True
-    return False
+    return (1 <= today.day <= 7) and (previous_month_code(today) == period_code)
 
 def fetch_profile(sb: Client, user_id: str):
+    # maybe_single() returns None if no row; raises on 4xx/5xx (e.g., RLS blocked)
     res = sb.table("profiles").select("role, organisation").eq("user_id", user_id).maybe_single().execute()
     return res.data if res.data else None
 
-def ensure_postgrest_auth(sb: Client):
-    # Make sure PostgREST uses the user's JWT (not just the anon key)
-    try:
-        sess = sb.auth.get_session()
-        token = getattr(sess, "access_token", None) or (sess.get("access_token") if isinstance(sess, dict) else None)
-        if token:
+def apply_user_jwt(sb: Client):
+    # Ensure PostgREST uses the logged-in user's JWT, not just anon key
+    token = st.session_state.get("access_token")
+    if token:
+        try:
             sb.postgrest.auth(token)
-    except Exception:
-        pass
+            return True
+        except Exception:
+            return False
+    return False
 
 def load_submission(sb: Client, org: str, period_code: str):
     return sb.table("submissions").select("id, status, values").eq("organisation", org).eq("period_code", period_code).maybe_single().execute().data
@@ -59,28 +59,43 @@ if "user" not in st.session_state:
     if ok:
         try:
             resp = sb.auth.sign_in_with_password({"email": email, "password": password})
-            if resp.user:
-                # Ensure subsequent table calls use the user's JWT
+            if resp.user and resp.session and getattr(resp.session, "access_token", None):
+                # Persist token across reruns
+                st.session_state["user"] = {"id": resp.user.id, "email": email}
+                st.session_state["access_token"] = resp.session.access_token
                 try:
                     sb.postgrest.auth(resp.session.access_token)
                 except Exception:
                     pass
-                st.session_state["user"] = {"id": resp.user.id, "email": email}
                 st.rerun()
             else:
-                st.error("Invalid credentials")
+                st.error("Invalid credentials or missing session token.")
         except Exception as e:
             st.error(f"Login failed: {e}")
     st.stop()
 
-# Re-apply auth header on reruns
-ensure_postgrest_auth(sb)
+# Re-apply JWT on every run
+jwt_ok = apply_user_jwt(sb)
 
 user = st.session_state["user"]
-profile = fetch_profile(sb, user["id"])
+
+# Fetch profile with error handling that hints at RLS/setup issues
+profile = None
+try:
+    profile = fetch_profile(sb, user["id"])
+except Exception as e:
+    st.error("Could not read your profile. This is usually one of:\n"
+             "• RLS select policy missing on public.profiles\n"
+             "• You're still using the anon key for PostgREST (JWT not applied)\n"
+             "• The profiles table doesn't exist\n\n"
+             "Quick check in Supabase SQL:\n"
+             "  select policyname, cmd from pg_policies where tablename='profiles';\n"
+             "  select user_id, role, organisation from public.profiles limit 5;")
+    st.stop()
 
 if not profile:
-    st.error("No profile found for your account.\n\nAsk an admin to create your profile row in the `profiles` table with your `user_id`, role and organisation.")
+    st.error("No profile found for your account.\n\nCreate a row in **Table Editor → public.profiles** with:\n"
+             f"• user_id = {user['id']}\n• role = 'admin' or 'submitter'\n• organisation = 'TestCo' (or yours)")
     st.stop()
 
 role = profile["role"]
@@ -105,16 +120,13 @@ if page == "Dashboard":
     period = previous_month_code()
     st.caption(f"Organisation: **{org}** · Period: **{period}**")
 
-    # Admin can override org/period
+    # Admin override
     if is_admin:
         st.info("Admin mode: you can load any organisation and period below.")
         cols = st.columns(3)
         with cols[0]:
-            # list orgs
             org_rows = sb.table("profiles").select("organisation").execute().data or []
             orgs = sorted({r["organisation"] for r in org_rows if r.get("organisation")})
-            if not orgs:
-                st.warning("No organisations found in profiles.")
             org_pick = st.selectbox("Organisation", options=orgs, index=orgs.index(org) if org in orgs else 0 if orgs else None)
         with cols[1]:
             period_pick = st.text_input("Period (YYYY-MM)", value=period)
@@ -156,7 +168,6 @@ if page == "Dashboard":
 if page == "Reports":
     st.header("Reports")
     st.info("Placeholders for monthly report downloads (hook to your storage or reports table).")
-    # Example: list distinct months with submissions
     months = sb.table("submissions").select("period_code").order("period_code").execute().data or []
     uniq = sorted({m["period_code"] for m in months if m.get("period_code")})
     if uniq:
