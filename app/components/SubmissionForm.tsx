@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabaseBrowser } from '@/lib/supabaseClient';
 import { isWithinEditWindow } from '@/lib/timeWindow';
+import type { SupabaseClient } from '@supabase/supabase-js';
+const supabase: SupabaseClient = supabaseBrowser;
+
 
 const METRIC_CODES = ['dist_nsw','dist_qld','dist_sant','dist_victas','dist_wa','dist_total'] as const;
 type MetricCode = typeof METRIC_CODES[number];
@@ -20,7 +23,7 @@ function z(n: unknown): number {
 }
 
 export default function SubmissionForm() {
-  const supabase = supabaseBrowser();
+  const supabase = supabaseBrowser;
 
   const [periodCode, setPeriodCode] = useState<string>('');     // e.g. '2025-07'
   const [periodId, setPeriodId]     = useState<string>('');     // uuid for the period row
