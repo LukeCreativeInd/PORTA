@@ -44,6 +44,33 @@ def persist_submission(sb: Client, sub_id: str | None, user_id: str, org: str, p
     else:
         res = sb.table("submissions").insert(payload).select("id").single().execute()
         return res.data["id"] if res.data else None
+def fetch_profile_via_http(user_id: str):
+    """
+    Fallback: query PostgREST directly with the user's JWT.
+    Requires SUPABASE_URL and SUPABASE_ANON_KEY in secrets/env.
+    """
+    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    anon = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
+    token = st.session_state.get("access_token")
+    if not (url and anon and token):
+        return None
+    endpoint = f"{url}/rest/v1/profiles"
+    params = {
+        "select": "role,organisation",
+        "user_id": f"eq.{user_id}",
+    }
+    headers = {
+        "apikey": anon,
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        r = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return (data[0] if isinstance(data, list) and data else None)
+    except Exception:
+        return None
+
 
 # ---------- Auth ----------
 sb = get_client()
@@ -83,19 +110,21 @@ user = st.session_state["user"]
 profile = None
 try:
     profile = fetch_profile(sb, user["id"])
-except Exception as e:
-    st.error("Could not read your profile. This is usually one of:\n"
-             "• RLS select policy missing on public.profiles\n"
-             "• You're still using the anon key for PostgREST (JWT not applied)\n"
-             "• The profiles table doesn't exist\n\n"
-             "Quick check in Supabase SQL:\n"
-             "  select policyname, cmd from pg_policies where tablename='profiles';\n"
-             "  select user_id, role, organisation from public.profiles limit 5;")
-    st.stop()
+except Exception:
+    profile = None
+
+# Fallback via direct HTTP (uses JWT). If this works, your client wasn't sending the token.
+if not profile:
+    profile = fetch_profile_via_http(user["id"])
 
 if not profile:
-    st.error("No profile found for your account.\n\nCreate a row in **Table Editor → public.profiles** with:\n"
-             f"• user_id = {user['id']}\n• role = 'admin' or 'submitter'\n• organisation = 'TestCo' (or yours)")
+    st.error(
+        "Could not read your profile. Likely causes:\n"
+        "• RLS select policy missing on public.profiles, or\n"
+        "• Your request isn't carrying the user JWT.\n\n"
+        "Fix now: Ensure policies exist and that Streamlit secrets contain SUPABASE_URL and SUPABASE_ANON_KEY.\n"
+        "Then re-run."
+    )
     st.stop()
 
 role = profile["role"]
