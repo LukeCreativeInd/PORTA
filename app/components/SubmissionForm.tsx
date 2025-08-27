@@ -16,45 +16,70 @@ export default function SubmissionForm() {
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      // latest period
-      const { data: pList } = await supabaseBrowser.from('periods').select('*').order('year', {ascending:false}).order('month',{ascending:false}).limit(1);
-      const p = pList?.[0];
-      if (!p) { setLoading(false); return; }
-      setPeriodCode(p.period_code);
-      setPeriodId(p.id);
+  (async () => {
+    setLoading(true);
 
-      // profile
-      const { data: { user } } = await supabaseBrowser.auth.getUser();
-      const { data: prof } = await supabaseBrowser.from('profiles').select('*').eq('user_id', user?.id).maybeSingle();
-      setOrganisation(prof?.organisation || '');
+    // 1) Pick the latest OPEN period
+    const { data: pList, error: perr } = await supabaseBrowser
+      .from('periods')
+      .select('*')
+      .eq('status', 'open')                // ← only open periods
+      .order('year', { ascending: false })
+      .order('month', { ascending: false })
+      .limit(1);
 
-      // ensure submission exists
-      const { data: sub } = await supabaseBrowser
-        .from('submissions')
-        .upsert({ period_id: p.id, organisation: prof.organisation, owner_id: user!.id }, { onConflict: 'period_id,organisation' })
-        .select('*')
-        .maybeSingle();
-      setSubmissionId(sub?.id);
-      setStatus(sub?.status || 'draft');
+    const p = pList?.[0];
+    if (!p) { setLoading(false); return; }
 
-      // load metric values
-      if (sub?.id) {
-        const { data: metricRows } = await supabaseBrowser.from('metrics').select('id,code');
-        const { data: valRows } = await supabaseBrowser.from('submission_values').select('metric_id,value').eq('submission_id', sub.id);
-        const byCode: Record<string, number> = {};
-        metricRows?.forEach(m => {
-          const v = valRows?.find(v=>v.metric_id===m.id);
-          byCode[m.code] = Number(v?.value ?? 0);
-        });
-        setValues(byCode);
-      }
+    setPeriodCode(p.period_code);
+    setPeriodId(p.id);
 
-      setCanEdit(isWithinEditWindow(p.period_code) && (status!=='locked'));
-      setLoading(false);
-    })();
-  }, []);
+    // 2) Profile (for organisation)
+    const { data: { user } } = await supabaseBrowser.auth.getUser();
+    const { data: prof } = await supabaseBrowser
+      .from('profiles')
+      .select('*')
+      .eq('user_id', user?.id)
+      .maybeSingle();
+    const orgName = prof?.organisation || '';
+    setOrganisation(orgName);
+
+    // 3) Ensure submission exists for this user x period x organisation
+    const { data: sub } = await supabaseBrowser
+      .from('submissions')
+      .upsert(
+        { period_id: p.id, organisation: orgName, owner_id: user!.id },
+        { onConflict: 'period_id,organisation' }
+      )
+      .select('*')
+      .maybeSingle();
+
+    setSubmissionId(sub?.id);
+    const subStatus = (sub?.status as typeof status) || 'draft';
+    setStatus(subStatus);
+
+    // 4) Load metric values
+    if (sub?.id) {
+      const { data: metricRows } = await supabaseBrowser.from('metrics').select('id,code');
+      const { data: valRows } = await supabaseBrowser
+        .from('submission_values')
+        .select('metric_id,value')
+        .eq('submission_id', sub.id);
+
+      const byCode: Record<string, number> = {};
+      metricRows?.forEach(m => {
+        const v = valRows?.find(v => v.metric_id === m.id);
+        byCode[m.code] = Number(v?.value ?? 0);
+      });
+      setValues(byCode);
+    }
+
+    // 5) Compute editability based on window + submission status
+    setCanEdit(isWithinEditWindow(p.period_code) && subStatus !== 'locked');
+    setLoading(false);
+  })();
+}, []);
+
 
   const handleChange = (code:string, v:string) => {
     setValues(s => ({...s, [code]: Number(v||0)}));
