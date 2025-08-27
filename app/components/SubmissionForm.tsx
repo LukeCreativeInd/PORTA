@@ -71,10 +71,12 @@ export default function SubmissionForm() {
         setPeriodCode(period.code);
       }
 
-      // Example org (replace with real organisation resolution)
-      const { data: profile } = await supabase.auth.getUser();
-      const org = profile?.data?.user?.user_metadata?.organisation ?? 'TestCo';
-      setOrganisation(org);
+      type UserMeta = { organisation?: string };
+
+const { data: profile } = await supabase.auth.getUser();
+const org = (profile.user?.user_metadata as UserMeta | undefined)?.organisation ?? 'TestCo';
+setOrganisation(org);
+
 
       // Gate editing by time window + status later
       setCanEdit(isWithinEditWindow(period?.code ?? ''));
