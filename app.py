@@ -1,4 +1,8 @@
+import os
 import datetime as dt
+from typing import Optional
+
+import requests
 import streamlit as st
 import pandas as pd
 from supabase import Client
@@ -6,24 +10,20 @@ from lib.supabase_client import get_client
 
 st.set_page_config(page_title="PORTA Portal", layout="wide")
 
-def previous_month_code(today=None):
+# ---------------- Helpers ----------------
+def previous_month_code(today: Optional[dt.date] = None) -> str:
     if today is None:
         today = dt.date.today()
     first = today.replace(day=1)
     prev_last = first - dt.timedelta(days=1)
     return prev_last.strftime("%Y-%m")
 
-def is_within_window(period_code: str):
+def is_within_window(period_code: str) -> bool:
     today = dt.date.today()
     return (1 <= today.day <= 7) and (previous_month_code(today) == period_code)
 
-def fetch_profile(sb: Client, user_id: str):
-    # maybe_single() returns None if no row; raises on 4xx/5xx (e.g., RLS blocked)
-    res = sb.table("profiles").select("role, organisation").eq("user_id", user_id).maybe_single().execute()
-    return res.data if res.data else None
-
-def apply_user_jwt(sb: Client):
-    # Ensure PostgREST uses the logged-in user's JWT, not just anon key
+def apply_user_jwt(sb: Client) -> bool:
+    """Ensure PostgREST uses the logged-in user's JWT, not just anon key."""
     token = st.session_state.get("access_token")
     if token:
         try:
@@ -33,36 +33,26 @@ def apply_user_jwt(sb: Client):
             return False
     return False
 
-def load_submission(sb: Client, org: str, period_code: str):
-    return sb.table("submissions").select("id, status, values").eq("organisation", org).eq("period_code", period_code).maybe_single().execute().data
+def fetch_profile(sb: Client, user_id: str):
+    res = (
+        sb.table("profiles")
+        .select("role, organisation")
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    return res.data if res.data else None
 
-def persist_submission(sb: Client, sub_id: str | None, user_id: str, org: str, period_code: str, values: dict, status: str):
-    payload = {"organisation": org, "period_code": period_code, "values": values, "status": status, "created_by": user_id}
-    if sub_id:
-        sb.table("submissions").update(payload).eq("id", sub_id).execute()
-        return sub_id
-    else:
-        res = sb.table("submissions").insert(payload).select("id").single().execute()
-        return res.data["id"] if res.data else None
 def fetch_profile_via_http(user_id: str):
-    """
-    Fallback: query PostgREST directly with the user's JWT.
-    Requires SUPABASE_URL and SUPABASE_ANON_KEY in secrets/env.
-    """
+    """Fallback: query PostgREST directly with the user's JWT."""
     url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
     anon = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
     token = st.session_state.get("access_token")
     if not (url and anon and token):
         return None
     endpoint = f"{url}/rest/v1/profiles"
-    params = {
-        "select": "role,organisation",
-        "user_id": f"eq.{user_id}",
-    }
-    headers = {
-        "apikey": anon,
-        "Authorization": f"Bearer {token}",
-    }
+    params = {"select": "role,organisation", "user_id": f"eq.{user_id}"}
+    headers = {"apikey": anon, "Authorization": f"Bearer {token}"}
     try:
         r = requests.get(endpoint, headers=headers, params=params, timeout=10)
         r.raise_for_status()
@@ -71,12 +61,45 @@ def fetch_profile_via_http(user_id: str):
     except Exception:
         return None
 
+def load_submission(sb: Client, org: str, period_code: str):
+    res = (
+        sb.table("submissions")
+        .select("id, status, values")
+        .eq("organisation", org)
+        .eq("period_code", period_code)
+        .maybe_single()
+        .execute()
+    )
+    return res.data if res.data else None
 
-# ---------- Auth ----------
+def persist_submission(
+    sb: Client,
+    sub_id: Optional[str],
+    user_id: str,
+    org: str,
+    period_code: str,
+    values: dict,
+    status: str,
+) -> Optional[str]:
+    payload = {
+        "organisation": org,
+        "period_code": period_code,
+        "values": values,
+        "status": status,
+        "created_by": user_id,
+    }
+    if sub_id:
+        sb.table("submissions").update(payload).eq("id", sub_id).execute()
+        return sub_id
+    else:
+        res = sb.table("submissions").insert(payload).select("id").single().execute()
+        return res.data["id"] if res.data else None
+
+# ---------------- App ----------------
 sb = get_client()
-
 st.title("PORTA Portal")
 
+# Login
 if "user" not in st.session_state:
     with st.form("login"):
         st.subheader("Login")
@@ -86,8 +109,7 @@ if "user" not in st.session_state:
     if ok:
         try:
             resp = sb.auth.sign_in_with_password({"email": email, "password": password})
-            if resp.user and resp.session and getattr(resp.session, "access_token", None):
-                # Persist token across reruns
+            if getattr(resp, "user", None) and getattr(resp, "session", None) and getattr(resp.session, "access_token", None):
                 st.session_state["user"] = {"id": resp.user.id, "email": email}
                 st.session_state["access_token"] = resp.session.access_token
                 try:
@@ -101,26 +123,24 @@ if "user" not in st.session_state:
             st.error(f"Login failed: {e}")
     st.stop()
 
-# Re-apply JWT on every run
-jwt_ok = apply_user_jwt(sb)
+# Re-apply JWT each run
+apply_user_jwt(sb)
 
 user = st.session_state["user"]
 
-# Fetch profile with error handling that hints at RLS/setup issues
+# Read profile (with fallback)
 profile = None
 try:
     profile = fetch_profile(sb, user["id"])
 except Exception:
     profile = None
-
-# Fallback via direct HTTP (uses JWT). If this works, your client wasn't sending the token.
 if not profile:
     profile = fetch_profile_via_http(user["id"])
 
 if not profile:
     st.error(
         "Could not read your profile. Likely causes:\n"
-        "• RLS select policy missing on public.profiles, or\n"
+        "• RLS SELECT policy missing on public.profiles, or\n"
         "• Your request isn't carrying the user JWT.\n\n"
         "Fix now: Ensure policies exist and that Streamlit secrets contain SUPABASE_URL and SUPABASE_ANON_KEY.\n"
         "Then re-run."
@@ -143,23 +163,23 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-# ---------- Dashboard ----------
+# Dashboard
 if page == "Dashboard":
     st.header("Dashboard")
     period = previous_month_code()
     st.caption(f"Organisation: **{org}** · Period: **{period}**")
 
-    # Admin override
     if is_admin:
-        st.info("Admin mode: you can load any organisation and period below.")
-        cols = st.columns(3)
-        with cols[0]:
-            org_rows = sb.table("profiles").select("organisation").execute().data or []
-            orgs = sorted({r["organisation"] for r in org_rows if r.get("organisation")})
-            org_pick = st.selectbox("Organisation", options=orgs, index=orgs.index(org) if org in orgs else 0 if orgs else None)
-        with cols[1]:
+        st.info("Admin mode: load any organisation and period below.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            rows = sb.table("profiles").select("organisation").execute().data or []
+            orgs = sorted({r["organisation"] for r in rows if r.get("organisation")})
+            idx = orgs.index(org) if org in orgs else (0 if orgs else 0)
+            org_pick = st.selectbox("Organisation", options=orgs, index=idx if orgs else 0)
+        with c2:
             period_pick = st.text_input("Period (YYYY-MM)", value=period)
-        with cols[2]:
+        with c3:
             do_load = st.button("Load")
         if do_load and orgs:
             org = org_pick
@@ -189,14 +209,14 @@ if page == "Dashboard":
     if save or submit:
         status = "submitted" if submit else "draft"
         payload_vals = vals | {"dist_total": sum(vals.values())}
-        new_id = persist_submission(sb, sub.get("id"), user["id"], org, period, payload_vals, status)
+        _ = persist_submission(sb, sub.get("id"), user["id"], org, period, payload_vals, status)
         st.success(f"{'Submitted' if submit else 'Saved draft'} for {org} / {period}")
         st.experimental_rerun()
 
-# ---------- Reports ----------
+# Reports
 if page == "Reports":
     st.header("Reports")
-    st.info("Placeholders for monthly report downloads (hook to your storage or reports table).")
+    st.info("Placeholder for monthly report downloads.")
     months = sb.table("submissions").select("period_code").order("period_code").execute().data or []
     uniq = sorted({m["period_code"] for m in months if m.get("period_code")})
     if uniq:
@@ -204,35 +224,47 @@ if page == "Reports":
     else:
         st.write("No data yet.")
 
-# ---------- Admin ----------
+# Admin
 if page == "Admin":
     st.header("Admin")
-    cols = st.columns([2,1,1,1])
-    with cols[0]:
-        org_rows = sb.table("profiles").select("organisation").execute().data or []
-        orgs = sorted({r["organisation"] for r in org_rows if r.get("organisation")})
+    colA, colB, colC, colD = st.columns([2,1,1,1])
+    with colA:
+        rows = sb.table("profiles").select("organisation").execute().data or []
+        orgs = sorted({r["organisation"] for r in rows if r.get("organisation")})
         admin_org = st.selectbox("Organisation", options=orgs) if orgs else None
-    with cols[1]:
+    with colB:
         admin_period = st.text_input("Period (YYYY-MM)", value=previous_month_code())
-    with cols[2]:
+    with colC:
         if st.button("Load submission") and admin_org:
             st.session_state["admin_load"] = True
-    with cols[3]:
+    with colD:
         if st.button("Export CSV (month)"):
-            rows = sb.table("submissions").select("organisation,period_code,values,status").eq("period_code", admin_period).execute().data or []
+            data = (
+                sb.table("submissions")
+                .select("organisation,period_code,values,status")
+                .eq("period_code", admin_period)
+                .execute()
+                .data
+                or []
+            )
             flat = []
-            for r in rows:
+            for r in data:
                 v = r.get("values") or {}
                 flat.append({
-                    "organisation": r["organisation"], "period_code": r["period_code"], "status": r["status"],
-                    "dist_nsw": v.get("dist_nsw",0), "dist_qld": v.get("dist_qld",0), "dist_sant": v.get("dist_sant",0),
-                    "dist_victas": v.get("dist_victas",0), "dist_wa": v.get("dist_wa",0), "dist_total": v.get("dist_total",0),
+                    "organisation": r["organisation"],
+                    "period_code": r["period_code"],
+                    "status": r["status"],
+                    "dist_nsw": v.get("dist_nsw",0),
+                    "dist_qld": v.get("dist_qld",0),
+                    "dist_sant": v.get("dist_sant",0),
+                    "dist_victas": v.get("dist_victas",0),
+                    "dist_wa": v.get("dist_wa",0),
+                    "dist_total": v.get("dist_total",0),
                 })
             if flat:
-                import pandas as pd
                 df = pd.DataFrame(flat)
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                st.download_button("Download CSV", data=csv_bytes, file_name=f"porta-{admin_period}.csv", mime="text/csv")
+                st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"),
+                                   file_name=f"porta-{admin_period}.csv", mime="text/csv")
             else:
                 st.warning("No data for that month.")
 
@@ -241,20 +273,20 @@ if page == "Admin":
         vals = {k: int(sub["values"].get(k, 0)) for k in ["dist_nsw","dist_qld","dist_sant","dist_victas","dist_wa"]}
         st.subheader(f"Edit — {admin_org} / {admin_period}")
         with st.form("admin_edit"):
-            cols = st.columns(5)
-            vals["dist_nsw"] = cols[0].number_input("dist_nsw", min_value=0, value=vals["dist_nsw"])
-            vals["dist_qld"] = cols[1].number_input("dist_qld", min_value=0, value=vals["dist_qld"])
-            vals["dist_sant"] = cols[2].number_input("dist_sant", min_value=0, value=vals["dist_sant"])
-            vals["dist_victas"] = cols[3].number_input("dist_victas", min_value=0, value=vals["dist_victas"])
-            vals["dist_wa"] = cols[4].number_input("dist_wa", min_value=0, value=vals["dist_wa"])
+            c = st.columns(5)
+            vals["dist_nsw"]   = c[0].number_input("dist_nsw", min_value=0, value=vals["dist_nsw"])
+            vals["dist_qld"]   = c[1].number_input("dist_qld", min_value=0, value=vals["dist_qld"])
+            vals["dist_sant"]  = c[2].number_input("dist_sant", min_value=0, value=vals["dist_sant"])
+            vals["dist_victas"]= c[3].number_input("dist_victas", min_value=0, value=vals["dist_victas"])
+            vals["dist_wa"]    = c[4].number_input("dist_wa", min_value=0, value=vals["dist_wa"])
             total = sum(vals.values())
             st.text_input("dist_total", value=str(total), disabled=True)
-            c1, c2 = st.columns(2)
-            do_save = c1.form_submit_button("Save draft")
-            do_submit = c2.form_submit_button("Submit")
-        if do_save or do_submit:
-            status = "submitted" if do_submit else "draft"
-            new_id = persist_submission(sb, sub.get("id"), user["id"], admin_org, admin_period, vals | {"dist_total": total}, status)
-            st.success(f"{'Submitted' if do_submit else 'Saved draft'} for {admin_org} / {admin_period}")
+            left, right = st.columns(2)
+            save_admin = left.form_submit_button("Save draft")
+            submit_admin = right.form_submit_button("Submit")
+        if save_admin or submit_admin:
+            status = "submitted" if submit_admin else "draft"
+            _ = persist_submission(sb, sub.get("id"), user["id"], admin_org, admin_period, vals | {"dist_total": total}, status)
+            st.success(f"{'Submitted' if submit_admin else 'Saved draft'} for {admin_org} / {admin_period}")
             st.session_state["admin_load"] = False
             st.experimental_rerun()
